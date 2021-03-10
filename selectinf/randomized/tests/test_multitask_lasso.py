@@ -28,7 +28,7 @@ def cross_validate_posi_global(ntask=2,
                                                                                        sigma,
                                                                                        signal,
                                                                                        rhos,
-                                                                                       random_signs=False,
+                                                                                       random_signs=True,
                                                                                        equicorrelated=False)[:4]
     cv_weights = []
 
@@ -43,8 +43,8 @@ def cross_validate_posi_global(ntask=2,
         response_vars_test = {i: response_vars[i][test] for i in range(ntask)}
         predictor_vars_test = {i: predictor_vars[i][test] for i in range(ntask)}
 
-        lambdamin = .5
-        lambdamax = np.sqrt(2*np.log(p))
+        lambdamin = 1.0
+        lambdamax = 2*np.sqrt(2*np.log(p))
         weights = np.arange(np.log(lambdamin),np.log(lambdamax), lambdamax/50)
         weights = np.exp(weights)
 
@@ -58,17 +58,24 @@ def cross_validate_posi_global(ntask=2,
 
             _initial_omega = np.array([randomizer_scales[i] * _gaussian_noise[(i * p):((i + 1) * p)] for i in range(ntask)]).T
 
-            multi_lasso = multi_task_lasso.gaussian(predictor_vars_train,
+            try:
+                multi_lasso = multi_task_lasso.gaussian(predictor_vars_train,
                                             response_vars_train,
                                             feature_weight,
                                             ridge_term=None,
                                             randomizer_scales=randomizer_scales)
 
-            multi_lasso.fit(perturbations=_initial_omega)
+                multi_lasso.fit(perturbations=_initial_omega)
 
-            dispersions = sigma ** 2
+                dispersions = sigma ** 2
 
-            estimate, observed_info_mean, _, _, intervals = multi_lasso.multitask_inference_global(dispersions=dispersions)
+                estimate, observed_info_mean, _, _, intervals = multi_lasso.multitask_inference_global(dispersions=dispersions)
+
+            except:
+                sum = 0
+                for j in range(ntask):
+                    sum += np.linalg.norm(response_vars_test[j], 2)
+                errors.append(sum)
 
             error = []
 
@@ -92,7 +99,7 @@ def cross_validate_posi_hetero(ntask=2,
                    global_sparsity=.8,
                    task_sparsity=.3,
                    sigma=1. * np.ones(2),
-                   signal_fac=.7,
+                   signal_fac=np.array([1., 5.]),
                    rhos=0. * np.ones(2),
                    randomizer_scale =1):
 
@@ -108,7 +115,108 @@ def cross_validate_posi_hetero(ntask=2,
                                                                                        sigma,
                                                                                        signal,
                                                                                        rhos,
-                                                                                       random_signs=False,
+                                                                                       random_signs=True,
+                                                                                       equicorrelated=False)[:4]
+    cv_weights = []
+
+    for i in range(10):
+
+        train = np.random.choice(np.arange(nsamples[0]), size=np.int(np.round(.8*nsamples[0])), replace=False)
+        test = np.setdiff1d(np.arange(nsamples[0]),train)
+
+        response_vars_train = {i: response_vars[i][train] for i in range(ntask)}
+        predictor_vars_train = {i: predictor_vars[i][train] for i in range(ntask)}
+
+        response_vars_test = {i: response_vars[i][test] for i in range(ntask)}
+        predictor_vars_test = {i: predictor_vars[i][test] for i in range(ntask)}
+
+        lambdamin = 1.0
+        lambdamax = 3*np.sqrt(2*np.log(p))
+        weights = np.arange(np.log(lambdamin),np.log(lambdamax), lambdamax/50)
+        weights = np.exp(weights)
+
+        errors = []
+
+        for w in range(len(weights)):
+
+            print(w)
+
+            feature_weight = weights[w] * np.ones(p)
+            sigmas_ = sigma
+            randomizer_scales = randomizer_scale * sigmas_
+
+            _initial_omega = np.array(
+                [randomizer_scales[i] * _gaussian_noise[(i * p):((i + 1) * p)] for i in range(ntask)]).T
+
+            try:
+                multi_lasso = multi_task_lasso.gaussian(predictor_vars_train,
+                                                    response_vars_train,
+                                                    feature_weight,
+                                                    ridge_term=None,
+                                                    randomizer_scales=randomizer_scales)
+
+                multi_lasso.fit(perturbations=_initial_omega)
+
+                active_signs = multi_lasso.fit(perturbations=_initial_omega)
+
+                dispersions = sigma ** 2
+
+                estimate, observed_info_mean, Z_scores, pvalues, intervals = multi_lasso.multitask_inference_hetero(
+                dispersions=dispersions)
+
+            except:
+                sum = 0
+                for j in range(ntask):
+                    sum += np.linalg.norm(response_vars_test[j], 2)
+                errors.append(sum)
+                continue
+
+            error = []
+
+            idx = 0
+
+            for j in range(ntask):
+
+                idx_new = np.sum(active_signs[:, j] != 0)
+                if idx_new == 0:
+                    continue
+                error.extend(response_vars_test[j] - (predictor_vars_test[j])[:, (active_signs[:, j] != 0)].dot(
+                    estimate[idx:idx + idx_new]))
+                idx = idx + idx_new
+
+            error = np.sqrt(np.sum(np.square(error))) / (len(test) * ntask)
+            errors.append(error)
+
+        idx_min_error = np.int(np.argmin(errors))
+        cv_weights.append(weights[idx_min_error])
+        print(cv_weights)
+
+    return (np.mean(np.asarray(cv_weights)))
+
+
+def cross_validate_naive_hetero(ntask=2,
+                   nsamples=500 * np.ones(2),
+                   p=100,
+                   global_sparsity=.8,
+                   task_sparsity=.3,
+                   sigma=1. * np.ones(2),
+                   signal_fac=np.array([1., 5.]),
+                   rhos=0. * np.ones(2),
+                   randomizer_scale =1):
+
+    nsamples = nsamples.astype(int)
+
+    signal = np.sqrt(signal_fac * 2 * np.log(p))
+
+    response_vars, predictor_vars, beta, _gaussian_noise = gaussian_multitask_instance(ntask,
+                                                                                       nsamples,
+                                                                                       p,
+                                                                                       global_sparsity,
+                                                                                       task_sparsity,
+                                                                                       sigma,
+                                                                                       signal,
+                                                                                       rhos,
+                                                                                       random_signs=True,
                                                                                        equicorrelated=False)[:4]
     cv_weights = []
 
@@ -124,33 +232,38 @@ def cross_validate_posi_hetero(ntask=2,
         predictor_vars_test = {i: predictor_vars[i][test] for i in range(ntask)}
 
         lambdamin = .5
-        lambdamax = 2.7
-        weights = np.arange(np.log(lambdamin),np.log(lambdamax), lambdamax/100)
+        lambdamax = 3*np.sqrt(2*np.log(p))
+        weights = np.arange(np.log(lambdamin),np.log(lambdamax), lambdamax/50)
         weights = np.exp(weights)
 
         errors = []
 
         for w in range(len(weights)):
 
+            print(errors,"err")
+
             feature_weight = weights[w] * np.ones(p)
             sigmas_ = sigma
             randomizer_scales = randomizer_scale * sigmas_
 
-            _initial_omega = np.array([randomizer_scales[i] * _gaussian_noise[(i * p):((i + 1) * p)] for i in range(ntask)]).T
+            perturbations = np.zeros((p, ntask))
 
-            multi_lasso = multi_task_lasso.gaussian(predictor_vars_train,
+            try:
+                multi_lasso = multi_task_lasso.gaussian(predictor_vars_train,
                                             response_vars_train,
                                             feature_weight,
                                             ridge_term=None,
-                                            randomizer_scales=randomizer_scales)
+                                            randomizer_scales=randomizer_scales,perturbations=perturbations)
 
-            multi_lasso.fit(perturbations=_initial_omega)
+                active_signs = multi_lasso.fit()
 
-            active_signs = multi_lasso.fit(perturbations=_initial_omega)
 
-            dispersions = sigma ** 2
-
-            estimate, observed_info_mean, Z_scores, pvalues, intervals = multi_lasso.multitask_inference_hetero(dispersions=dispersions)
+            except:
+                sum = 0
+                for j in range(ntask):
+                    sum += np.linalg.norm(response_vars_test[j], 2)
+                errors.append(sum)
+                continue
 
             error = []
 
@@ -161,8 +274,9 @@ def cross_validate_posi_hetero(ntask=2,
                 idx_new = np.sum(active_signs[:, j] != 0)
                 if idx_new ==0:
                     continue
-                error.extend(response_vars_test[j] - (predictor_vars_test[j])[:, (active_signs[:, j] != 0)].dot(estimate[idx:idx+idx_new]))
-                idx = idx + idx_new
+                X, y = multi_lasso.loglikes[j].data
+                observed_target = np.linalg.pinv(X[:, (active_signs[:, j] != 0)]).dot(y)
+                error.extend(response_vars_test[j] - (predictor_vars_test[j])[:, (active_signs[:, j] != 0)].dot(observed_target))
 
             error = np.sqrt(np.sum(np.square(error))) / (len(test) * ntask)
             errors.append(error)
@@ -329,7 +443,7 @@ def test_multitask_lasso_hetero(ntask=2,
                                 global_sparsity=.8,
                                 task_sparsity=.3,
                                 sigma=1. * np.ones(2),
-                                signal_fac=0.5,
+                                signal_fac= np.array([1., 5.]),
                                 rhos=0. * np.ones(2),
                                 weight=2.,
                                 randomizer_scale=1):
@@ -395,7 +509,7 @@ def test_multitask_lasso_naive_hetero(ntask=2,
                                       global_sparsity=.8,
                                       task_sparsity=.3,
                                       sigma=1. * np.ones(2),
-                                      signal_fac=0.5,
+                                      signal_fac=np.array([1., 5.]),
                                       rhos=0. * np.ones(2),
                                       weight=2.):
     nsamples = nsamples.astype(int)
@@ -457,6 +571,10 @@ def test_coverage(weight,nsim=100):
     len = []
     pivots = []
 
+    cov_naive = []
+    len_naive = []
+    pivots_naive = []
+
     ntask = 5
 
     #penalty = cross_validate_posi_global(ntask=ntask,
@@ -475,9 +593,20 @@ def test_coverage(weight,nsim=100):
                                          global_sparsity=0.95,
                                          task_sparsity=.2,
                                          sigma=1. * np.ones(ntask),
-                                         signal_fac=.7,
-                                         rhos=0.1 * np.ones(ntask),
+                                         signal_fac=np.array([1.0, 3.0]),
+                                         rhos=.7 * np.ones(ntask),
                                          randomizer_scale = weight)
+
+
+    penalty_hetero_naive = cross_validate_naive_hetero(ntask=ntask,
+                                                nsamples=1000 * np.ones(ntask),
+                                                p=50,
+                                                global_sparsity=0.95,
+                                                task_sparsity=.2,
+                                                sigma=1. * np.ones(ntask),
+                                                signal_fac=np.array([1.0, 3.0]),
+                                                rhos=.7 * np.ones(ntask),
+                                                randomizer_scale=weight)
 
     for n in range(nsim):
 
@@ -510,36 +639,44 @@ def test_coverage(weight,nsim=100):
                                                                   global_sparsity=0.95,
                                                                   task_sparsity=0.2,
                                                                   sigma=1. * np.ones(ntask),
-                                                                  signal_fac=.7,
-                                                                  rhos=0.10 * np.ones(ntask),
+                                                                  signal_fac=np.array([1.0, 3.0]),
+                                                                  rhos=.7 * np.ones(ntask),
                                                                   weight=np.float(penalty_hetero),
                                                                   randomizer_scale = weight)
 
-            # coverage, length, pivot = test_multitask_lasso_naive_hetero(ntask=ntask,
-            #                                                             nsamples=1000 * np.ones(ntask),
-            #                                                             p=50,
-            #                                                             global_sparsity=0.95,
-            #                                                             task_sparsity=0.20,
-            #                                                             sigma=1. * np.ones(ntask),
-            #                                                             signal_fac=np.array([1., 5.]),
-            #                                                             rhos=0.50 * np.ones(ntask),
-            #                                                             weight=1.)
+
+            coverage_naive, length_naive, pivot_naive = test_multitask_lasso_naive_hetero(ntask=ntask,
+                                                                         nsamples=1000 * np.ones(ntask),
+                                                                         p=50,
+                                                                         global_sparsity=0.95,
+                                                                         task_sparsity=0.20,
+                                                                         sigma=1. * np.ones(ntask),
+                                                                         signal_fac=np.array([1.0, 3.0]),
+                                                                         rhos=.7 * np.ones(ntask),
+                                                                         weight=np.float(penalty_hetero_naive))
 
             cov.extend(coverage)
             len.extend(length)
             pivots.extend(pivot)
 
+            cov_naive.extend(coverage_naive)
+            len_naive.extend(length_naive)
+            pivots_naive.extend(pivot_naive)
+
             print("iteration completed ", n)
-            print("coverage so far ", np.mean(np.asarray(cov)))
-            print("length so far ", np.mean(np.asarray(len)))
+            print("coverage so far ", np.mean(np.asarray(cov_naive)))
+            print("length so far ", np.mean(np.asarray(len_naive)))
 
         except:
             pass
 
     plt.clf()
     grid = np.linspace(0, 1, 101)
-    points = [np.searchsorted(np.sort(np.asarray(pivots)),i)/np.float(np.shape(pivots)[0]) for i in np.linspace(0, 1, 101)]
+    points = [np.min(np.searchsorted(np.sort(np.asarray(pivots)),i))/np.float(np.shape(pivots)[0]) for i in np.linspace(0, 1, 101)]
+    points_naive = [np.min(np.searchsorted(np.sort(np.asarray(pivots_naive)), i)) / np.float(np.shape(pivots_naive)[0]) for i in
+              np.linspace(0, 1, 101)]
     plt.plot(grid, points, c='blue', marker='^')
+    plt.plot(grid, points_naive, c='red', marker='^')
     plt.plot(grid, grid, 'k--')
     plt.savefig("pivot.png")
 
@@ -547,7 +684,7 @@ def test_coverage(weight,nsim=100):
 
 def main():
 
-    scale = np.arange(.6,.8,.025)
+    scale = [1]
     coverage = []
     coverage_er = []
     lengths = []
@@ -555,7 +692,7 @@ def main():
 
     for i in range(len(scale)):
         print(scale[i], 'signal')
-        results = test_coverage(scale[i], nsim=100)
+        results = test_coverage(scale[i], nsim=50)
         coverage = np.append(coverage, results[0])
         print(coverage,"cov")
         coverage_er = np.append(coverage_er, 1.64 * results[1] / np.sqrt(100))
